@@ -1,0 +1,101 @@
+diff --git i/src/output/MonitorFrameScheduler.cpp w/src/output/MonitorFrameScheduler.cpp
+index 9299bfb..070c046 100644
+--- i/src/output/MonitorFrameScheduler.cpp
++++ w/src/output/MonitorFrameScheduler.cpp
+@@ -35,8 +35,7 @@ void CMonitorFrameScheduler::onSyncFired() {
+     Log::logger->log(Log::TRACE, "CMonitorFrameScheduler: {} -> onSyncFired, missed.", PMONITOR->m_name);
+ 
+     // we are out. The frame is taking too long to render. Begin rendering immediately, but don't commit yet.
+-    m_pendingThird  = true;
+-    m_renderAtFrame = false; // block frame rendering, we already scheduled
++    onMissedFrame();
+ 
+     m_lastRenderBegun = hrc::now();
+ 
+@@ -127,6 +126,22 @@ void CMonitorFrameScheduler::onFrame() {
+     onFinishRender();
+ }
+ 
++void CMonitorFrameScheduler::onMissedFrame() {
++    m_pendingThird  = true;
++    m_renderAtFrame = false; // block frame rendering, we already scheduled
++}
++
++void CMonitorFrameScheduler::onCommitFailed() {
++    // A frame that failed to commit is never presented, so onPresented() will not come to commit the
++    // pending one or re-enable rendering. Render again at the next frame event instead.
++    m_pendingThird  = false;
++    m_renderAtFrame = true;
++}
++
++bool CMonitorFrameScheduler::rendersAtFrame() const {
++    return m_renderAtFrame;
++}
++
+ void CMonitorFrameScheduler::onFinishRender() {
+     m_sync = g_pHyprRenderer->createSyncFDManager(); // this destroys the old sync
+     if (!m_sync || !m_sync->isValid()) {
+diff --git i/src/output/MonitorFrameScheduler.hpp w/src/output/MonitorFrameScheduler.hpp
+index 11c130a..77caca0 100644
+--- i/src/output/MonitorFrameScheduler.hpp
++++ w/src/output/MonitorFrameScheduler.hpp
+@@ -20,6 +20,9 @@ namespace Monitor {
+         void                    onSyncFired();
+         void                    onPresented();
+         void                    onFrame();
++        void                    onMissedFrame();
++        void                    onCommitFailed();
++        bool                    rendersAtFrame() const;
+ 
+       private:
+         bool                       canRender();
+diff --git i/src/render/Renderer.cpp w/src/render/Renderer.cpp
+index 92b1ac7..35e4d41 100644
+--- i/src/render/Renderer.cpp
++++ w/src/render/Renderer.cpp
+@@ -37,6 +37,7 @@
+ #include "../helpers/CursorShapes.hpp"
+ #include "../helpers/MainLoopExecutor.hpp"
+ #include "../output/Monitor.hpp"
++#include "../output/MonitorFrameScheduler.hpp"
+ #include "../state/MonitorState.hpp"
+ #include "../state/WorkspaceState.hpp"
+ #include "macros.hpp"
+@@ -2483,6 +2484,9 @@ bool IHyprRenderer::commitPendingAndDoExplicitSync(PHLMONITOR pMonitor) {
+             // displayed
+             pMonitor->m_output->swapchain->rollback();
+             pMonitor->m_damage.damageEntire();
++            if (pMonitor->m_frameScheduler)
++                pMonitor->m_frameScheduler->onCommitFailed();
++            pMonitor->scheduleFrame();
+         }
+     }
+ 
+diff --git i/tests/output/MonitorFrameScheduler.cpp w/tests/output/MonitorFrameScheduler.cpp
+new file mode 100644
+index 0000000..3fa9fa7
+--- /dev/null
++++ w/tests/output/MonitorFrameScheduler.cpp
+@@ -0,0 +1,22 @@
++#include <output/MonitorFrameScheduler.hpp>
++
++#include <gtest/gtest.h>
++
++using namespace Monitor;
++
++TEST(MonitorFrameScheduler, MissedFrameWaitsForPresentation) {
++    CMonitorFrameScheduler scheduler(nullptr);
++
++    EXPECT_TRUE(scheduler.rendersAtFrame());
++    scheduler.onMissedFrame();
++    EXPECT_FALSE(scheduler.rendersAtFrame());
++}
++
++TEST(MonitorFrameScheduler, FailedCommitAfterMissedFrameRendersAgain) {
++    CMonitorFrameScheduler scheduler(nullptr);
++
++    scheduler.onMissedFrame();
++    // The pending frame's commit fails, so it is never presented and onPresented() never comes.
++    scheduler.onCommitFailed();
++    EXPECT_TRUE(scheduler.rendersAtFrame());
++}
